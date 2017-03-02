@@ -178,6 +178,7 @@ describe('BlobService', function () {
         var entries = [];
         containers.forEach(function (container) {
           if (container.name == containerName1) {
+            assert.equal(container.publicAccessLevel, 'container');
             assert.equal(container.metadata.color, metadata1.COLOR);
             assert.equal(container.metadata.containernumber, metadata1.containernumber);
             assert.equal(container.metadata.somemetadataname, metadata1.somemetadataname);
@@ -190,6 +191,7 @@ describe('BlobService', function () {
               }
             });
           } else if (container.name == containerName2) {
+            assert.equal(container.publicAccessLevel, 'blob');
             assert.equal(container.metadata.color, metadata2.Color);
             assert.equal(container.metadata.containernumber, metadata2.containerNumber);
             assert.equal(container.metadata.somemetadataname, metadata2.somemetadataname);
@@ -202,6 +204,7 @@ describe('BlobService', function () {
               }
             });
           } else if (container.name == containerName3) {
+            assert.equal(container.publicAccessLevel, null);
             assert.equal(container.metadata.color, metadata3.color);
             assert.equal(container.metadata.containernumber, metadata3.containernumber);
             assert.equal(container.metadata.somemetadataname, metadata3.somemetadataname);
@@ -214,6 +217,7 @@ describe('BlobService', function () {
               }
             });
           } else if (container.name == containerName4) {
+            assert.equal(container.publicAccessLevel, 'container');
             assert.equal(container.metadata.color, metadata4.color);
             assert.equal(container.metadata.containernumber, metadata4.containernumber);
             assert.equal(container.metadata.somemetadataname, metadata4.somemetadataname);
@@ -229,12 +233,12 @@ describe('BlobService', function () {
         });
       };
 
-      blobService.createContainer(containerName1, { metadata: metadata1 }, function (createError1, createContainer1, createResponse1) {
+      blobService.createContainer(containerName1, { publicAccessLevel: 'container', metadata: metadata1 }, function (createError1, createContainer1, createResponse1) {
         assert.equal(createError1, null);
         assert.notEqual(createContainer1, null);
         assert.ok(createResponse1.isSuccessful);
 
-        blobService.createContainer(containerName2, { metadata: metadata2 }, function (createError2, createContainer2, createResponse2) {
+        blobService.createContainer(containerName2, { publicAccessLevel: 'blob', metadata: metadata2 }, function (createError2, createContainer2, createResponse2) {
           assert.equal(createError2, null);
           assert.notEqual(createContainer2, null);
           assert.ok(createResponse2.isSuccessful);
@@ -244,7 +248,7 @@ describe('BlobService', function () {
             assert.notEqual(createContainer3, null);
             assert.ok(createResponse3.isSuccessful);
 
-            blobService.createContainer(containerName4, { metadata: metadata4 }, function (createError4, createContainer4, createResponse4) {
+            blobService.createContainer(containerName4, { publicAccessLevel: 'container', metadata: metadata4 }, function (createError4, createContainer4, createResponse4) {
               assert.equal(createError4, null);
               assert.notEqual(createContainer4, null);
               assert.ok(createResponse4.isSuccessful);
@@ -1117,6 +1121,87 @@ describe('BlobService', function () {
         });
       });
     });
+
+    runOrSkip('incremental copy should work', function(done) {
+      var sourceContainerName = testutil.generateId(containerNamesPrefix, containerNames, suite.isMocked);
+      var targetContainerName = testutil.generateId(containerNamesPrefix, containerNames, suite.isMocked);
+
+      var sourceBlobName = testutil.generateId(blobNamesPrefix, blobNames, suite.isMocked);
+      var targetBlobName = testutil.generateId(blobNamesPrefix, blobNames, suite.isMocked);
+
+      blobService.createContainer(sourceContainerName, function (err) {
+        assert.equal(err, null);
+
+        blobService.createContainer(targetContainerName, function (err) {
+          assert.equal(err, null);
+
+          blobService.createPageBlob(sourceContainerName, sourceBlobName, 1024, function(err) {
+            assert.equal(err, null);
+
+            blobService.createBlobSnapshot(sourceContainerName, sourceBlobName, function (snapshotError, snapshotId, snapshotResponse) {
+              assert.equal(snapshotError, null);
+              assert.notEqual(snapshotResponse, null);
+              assert.notEqual(snapshotId, null);
+
+              var startDate = new Date();
+              var expiryDate = new Date(startDate);
+              expiryDate.setMinutes(startDate.getMinutes() + 100);
+              startDate.setMinutes(startDate.getMinutes() - 100);
+
+              var sourceSAS = blobService.generateSharedAccessSignature(sourceContainerName, sourceBlobName, {
+                AccessPolicy: {
+                  Permissions: BlobUtilities.SharedAccessPermissions.READ,
+                  Start: startDate,
+                  Expiry: expiryDate
+                }
+              });
+              
+              blobService.startCopyBlob(blobService.getUrl(sourceContainerName, sourceBlobName, sourceSAS), targetContainerName, targetBlobName, {isIncrementalCopy: true, 'snapshotId': snapshotId}, function(err, result){
+                assert.equal(err, null);
+                assert.notEqual(result, null);
+                assert.notEqual(result.copy, null);
+                assert.notEqual(result.copy.id, null);
+                assert.notEqual(result.copy.status, null);
+
+                setTimeout(function() {
+                  blobService.listBlobsSegmented(targetContainerName, null, {include: 'snapshots'}, function(err, result) {
+                    assert.equal(err, null);
+                    // 1 base incremental copy blob + 1 snapshot
+                    assert.equal(result.entries.length, 2);
+
+                    var incrementalCopyBlob = result.entries.find(function(b) {
+                      return b.snapshot === undefined;
+                    });
+                    var incrementalCopyBlobSnapshot = result.entries.find(function(b) {
+                      return b.snapshot !== undefined;
+                    });
+
+                    assert.equal(incrementalCopyBlob.isIncrementalCopy, true);
+                    assert.notEqual(incrementalCopyBlob.copy.destinationSnapshot, null);                  
+
+                    blobService.getBlobProperties(targetContainerName, targetBlobName, function(err, result) {
+                      assert.equal(err, null);
+                      assert.equal(result.isIncrementalCopy, true);
+                      assert.notEqual(result.copy.destinationSnapshot, null);
+
+                      // base incremental blob cannot be read
+                      blobService.getBlobToText(targetContainerName, targetBlobName, { rangeStart: 1, rangeEnd: 2}, function(err) {
+                        assert.notEqual(err, null);
+                      
+                        blobService.getBlobToText(targetContainerName, targetBlobName, { rangeStart: 1, rangeEnd: 2, snapshotId: incrementalCopyBlobSnapshot.snapshot}, function(err) {
+                          assert.equal(err, null);
+                          done();
+                        });
+                      });
+                    });
+                  });
+                }, 10000); // Wait for incremental copy to complete
+              });
+            });
+          });
+        });
+      });
+    });
   });
 
   describe('shared access signature', function () {
@@ -1201,7 +1286,7 @@ describe('BlobService', function () {
         assert.strictEqual(parsedUrl.port, '80');
         assert.strictEqual(parsedUrl.hostname, 'host.com');
         assert.strictEqual(parsedUrl.pathname, '/' + containerName + '/' + blobName);
-        assert.strictEqual(parsedUrl.query, 'se=2011-10-12T11%3A53%3A40Z&spr=https&sv=2015-12-11&sr=b&sig=ik33VWmkGMluHULQvV3UnpOASTIlHdmilkhO2kmKVUE%3D');
+        assert.strictEqual(parsedUrl.query, 'se=2011-10-12T11%3A53%3A40Z&spr=https&sv=2016-05-31&sr=b&sig=5ubgzWFxfpW857DpF5QVK9HNbewzuQHjvwB%2BlGEdubM%3D');
 
         blobUrl = blobServiceassert.getUrl(containerName, blobName, sasToken, false, '2016-10-11T11:03:40Z');
 
@@ -1210,7 +1295,7 @@ describe('BlobService', function () {
         assert.strictEqual(parsedUrl.port, '80');
         assert.strictEqual(parsedUrl.hostname, 'host-secondary.com');
         assert.strictEqual(parsedUrl.pathname, '/' + containerName + '/' + blobName);
-        assert.strictEqual(parsedUrl.query, 'se=2011-10-12T11%3A53%3A40Z&spr=https&sv=2015-12-11&sr=b&sig=ik33VWmkGMluHULQvV3UnpOASTIlHdmilkhO2kmKVUE%3D&snapshot=2016-10-11T11%3A03%3A40Z');
+        assert.strictEqual(parsedUrl.query, 'se=2011-10-12T11%3A53%3A40Z&spr=https&sv=2016-05-31&sr=b&sig=5ubgzWFxfpW857DpF5QVK9HNbewzuQHjvwB%2BlGEdubM%3D&snapshot=2016-10-11T11%3A03%3A40Z');
 
         done();
       });
@@ -1291,7 +1376,7 @@ describe('BlobService', function () {
       assert.equal(sasQueryString[QueryStringConstants.SIGNED_PERMISSIONS], BlobUtilities.SharedAccessPermissions.READ);
       assert.equal(sasQueryString[QueryStringConstants.SIGNED_PROTOCOL], 'https');
       assert.equal(sasQueryString[QueryStringConstants.SIGNED_VERSION], HeaderConstants.TARGET_STORAGE_VERSION);
-      assert.equal(sasQueryString[QueryStringConstants.SIGNATURE], 'uviXtYg1dL5Cl1fP24H5ueARmnyfaIAqtaJRqw0RXFc=');
+      assert.equal(sasQueryString[QueryStringConstants.SIGNATURE], 'JM+OTBtD7HFVD3A/I5r/iE0HlW8yLcv7DMQoqDT/rtw=');
 
       done();
     });
